@@ -1,14 +1,18 @@
 import { isToolCallEventType, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { formatStatus, loadConfig, resolveConfigFilePath } from "./policy.js";
+import { DEFAULT_DISABLED_BUILTINS, formatStatus, loadConfig, resolveConfigFilePath } from "./policy.js";
 import { resolveHypaBinary, rewriteCommand } from "./rewrite-client.js";
 import { registerHypaMcpProxyBridge } from "./mcp-proxy-bridge.js";
 import { registerHypaTools } from "./tools.js";
 import type { HypaDiagnostics, RewriteStatus } from "./types.js";
 
-export const REPLACE_MODE_DISABLED_BUILTINS = new Set(["bash", "read", "grep", "find", "ls"]);
+export const REPLACE_MODE_DISABLED_BUILTINS = new Set(DEFAULT_DISABLED_BUILTINS);
 
-export function applyReplaceModeFilter(tools: string[], mode: string): string[] {
-  return mode === "replace" ? tools.filter((name) => !REPLACE_MODE_DISABLED_BUILTINS.has(name)) : tools;
+export function applyReplaceModeFilter(
+  tools: string[],
+  mode: string,
+  disabledBuiltins: ReadonlySet<string> = REPLACE_MODE_DISABLED_BUILTINS,
+): string[] {
+  return mode === "replace" ? tools.filter((name) => !disabledBuiltins.has(name)) : tools;
 }
 
 type HypaExtensionAPI = ExtensionAPI & {
@@ -21,9 +25,12 @@ export default function (pi: ExtensionAPI) {
   const hypaPi = pi as HypaExtensionAPI;
   const configFilePath = resolveConfigFilePath(process.env);
   const config = loadConfig(process.env, configFilePath);
+  const effectiveDisabledBuiltins = config.mode === "replace" ? config.disabledBuiltins : [];
+  const disabledBuiltins = new Set(effectiveDisabledBuiltins);
   const effectiveConfig = { ...config, binary: resolveHypaBinary(config.binary) };
   const diagnostics: HypaDiagnostics = {
     mode: config.mode,
+    disabledBuiltins: effectiveDisabledBuiltins,
     binary: config.binary,
     resolvedBinary: effectiveConfig.binary,
     configFilePath,
@@ -38,7 +45,7 @@ export default function (pi: ExtensionAPI) {
 
   if (config.mode === "replace") {
     pi.on("before_agent_start", () => {
-      const active = applyReplaceModeFilter(hypaPi.getActiveTools(), config.mode);
+      const active = applyReplaceModeFilter(hypaPi.getActiveTools(), config.mode, disabledBuiltins);
       hypaPi.setActiveTools(active);
     });
   }
@@ -61,9 +68,10 @@ export default function (pi: ExtensionAPI) {
       case "deny":
         return { block: true, reason: status.reason };
       case "ask": {
+        if (ctx.hasUI && !(await ctx.ui.confirm("Hypa confirmation", status.reason))) {
+          return { block: true, reason: "Blocked by user after Hypa confirmation request." };
+        }
         if (ctx.hasUI) {
-          const ok = await ctx.ui.confirm("Hypa confirmation", status.reason);
-          if (!ok) return { block: true, reason: "Blocked by user after Hypa confirmation request." };
           event.input.command = status.command;
           return;
         }
@@ -88,6 +96,7 @@ export default function (pi: ExtensionAPI) {
       const lines = [
         "Hypa Pi extension",
         `Mode: ${diagnostics.mode}`,
+        `Disabled Pi built-ins: ${diagnostics.disabledBuiltins.join(", ") || "none"}`,
         `Config file: ${diagnostics.configFilePath ?? "none"}`,
         `Binary: ${diagnostics.binary}`,
         `Resolved binary: ${diagnostics.resolvedBinary}`,

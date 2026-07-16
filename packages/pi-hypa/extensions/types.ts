@@ -1,6 +1,8 @@
 export type HypaPiMode = "additive" | "replace";
 export type AskNonInteractivePolicy = "deny" | "allow";
 
+export type ReplaceableBuiltin = "bash" | "read" | "grep" | "find" | "ls";
+
 export type RewriteOutcome =
   | "Rewritten"
   | "GenericWrapper"
@@ -25,6 +27,7 @@ export type RewriteStatus =
 
 export interface HypaPiConfig {
   mode: HypaPiMode;
+  disabledBuiltins: readonly ReplaceableBuiltin[];
   binary: string;
   rewriteTimeoutMs: number;
   askNonInteractive: AskNonInteractivePolicy;
@@ -35,6 +38,7 @@ export interface HypaPiConfig {
 
 export interface HypaDiagnostics {
   mode: HypaPiMode;
+  disabledBuiltins: readonly ReplaceableBuiltin[];
   configFilePath?: string;
   binary: string;
   resolvedBinary: string;

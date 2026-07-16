@@ -50,6 +50,7 @@ test("isHypaCommand prevents direct hypa rewrite loops", () => {
 test("loadConfig applies deterministic defaults", () => {
   const config = loadConfig({ HYPA_PI_CONFIG: "none" });
   assert.equal(config.mode, "additive");
+  assert.deepEqual(config.disabledBuiltins, ["bash", "read", "grep", "find", "ls"]);
   assert.equal(config.binary, "hypa");
   assert.equal(config.rewriteTimeoutMs, 5000);
   assert.equal(config.askNonInteractive, "deny");
@@ -75,6 +76,7 @@ test("loadConfig uses config file defaults with environment overrides", () => {
     configPath,
     JSON.stringify({
       mode: "replace",
+      disabledBuiltins: ["bash", "grep", "find", "ls"],
       binary: "/usr/local/bin/hypa-file",
       rewriteTimeoutMs: 7000,
       askNonInteractive: "allow",
@@ -97,6 +99,7 @@ test("loadConfig uses config file defaults with environment overrides", () => {
   );
 
   assert.equal(config.mode, "additive");
+  assert.deepEqual(config.disabledBuiltins, ["bash", "grep", "find", "ls"]);
   assert.equal(config.binary, "/usr/local/bin/hypa-env");
   assert.equal(config.rewriteTimeoutMs, 9000);
   assert.equal(config.askNonInteractive, "allow");
@@ -111,6 +114,7 @@ test("loadConfigFile parses valid JSON", () => {
     configPath,
     JSON.stringify({
       mode: "replace",
+      disabledBuiltins: ["bash", "grep", "find", "ls"],
       binary: " /opt/hypa ",
       rewriteTimeoutMs: 6000,
       askNonInteractive: "allow",
@@ -122,6 +126,7 @@ test("loadConfigFile parses valid JSON", () => {
 
   assert.deepEqual(loadConfigFile(configPath), {
     mode: "replace",
+    disabledBuiltins: ["bash", "grep", "find", "ls"],
     binary: "/opt/hypa",
     rewriteTimeoutMs: 6000,
     askNonInteractive: "allow",
@@ -139,6 +144,27 @@ test("loadConfigFile throws a descriptive error on malformed JSON", () => {
   const configPath = join(tempRoot, "malformed.json");
   writeFileSync(configPath, '{ "mode": "replace", }');
   assert.throws(() => loadConfigFile(configPath), /Failed to parse config file.*malformed\.json/);
+});
+
+test("loadConfigFile preserves an explicit empty disabledBuiltins list", () => {
+  const configPath = join(tempRoot, "empty-disabled-builtins.json");
+  writeFileSync(configPath, JSON.stringify({ mode: "replace", disabledBuiltins: [] }));
+  assert.deepEqual(loadConfigFile(configPath), { mode: "replace", disabledBuiltins: [] });
+  assert.deepEqual(loadConfig({ HYPA_PI_CONFIG: configPath }, configPath).disabledBuiltins, []);
+});
+
+test("loadConfigFile rejects invalid disabledBuiltins values", () => {
+  const cases = [
+    { name: "not-array", value: "bash", expected: /expected an array/ },
+    { name: "unknown", value: ["bash", "write"], expected: /disabledBuiltins\[1\].*expected one of/ },
+    { name: "duplicate", value: ["bash", "bash"], expected: /disabledBuiltins\[1\].*duplicate/ },
+  ];
+
+  for (const entry of cases) {
+    const configPath = join(tempRoot, `${entry.name}.json`);
+    writeFileSync(configPath, JSON.stringify({ mode: "replace", disabledBuiltins: entry.value }));
+    assert.throws(() => loadConfigFile(configPath), entry.expected);
+  }
 });
 
 test("loadConfig treats HYPA_PI_CONFIG=none and NONE and None as disable", () => {

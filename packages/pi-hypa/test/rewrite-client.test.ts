@@ -13,6 +13,7 @@ import type { HypaPiConfig } from "../extensions/types.js";
 
 const config: HypaPiConfig = {
   mode: "additive",
+  disabledBuiltins: ["bash", "read", "grep", "find", "ls"],
   binary: "hypa",
   rewriteTimeoutMs: 5000,
   askNonInteractive: "deny",

@@ -24,6 +24,36 @@ export function parseBooleanFlag(value: string | undefined): boolean {
   return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
 }
 
+export const DEFAULT_DISABLED_BUILTINS: HypaPiConfig["disabledBuiltins"] = Object.freeze([
+  "bash",
+  "read",
+  "grep",
+  "find",
+  "ls",
+]);
+
+const SUPPORTED_DISABLED_BUILTINS = new Set<string>(DEFAULT_DISABLED_BUILTINS);
+
+export function parseDisabledBuiltins(value: unknown): HypaPiConfig["disabledBuiltins"] {
+  if (!Array.isArray(value)) {
+    throw new Error("Invalid disabledBuiltins: expected an array of built-in tool names");
+  }
+
+  const seen = new Set<string>();
+  return value.map((name, index) => {
+    if (typeof name !== "string" || !SUPPORTED_DISABLED_BUILTINS.has(name)) {
+      throw new Error(
+        `Invalid disabledBuiltins[${index}]: expected one of ${DEFAULT_DISABLED_BUILTINS.join(", ")}; got ${JSON.stringify(name)}`,
+      );
+    }
+    if (seen.has(name)) {
+      throw new Error(`Invalid disabledBuiltins[${index}]: duplicate built-in ${JSON.stringify(name)}`);
+    }
+    seen.add(name);
+    return name as HypaPiConfig["disabledBuiltins"][number];
+  });
+}
+
 export function resolveConfigFilePath(env: NodeJS.ProcessEnv): string | undefined {
   const fromEnv = env.HYPA_PI_CONFIG?.trim();
   if (fromEnv !== undefined) {
@@ -53,6 +83,9 @@ export function loadConfigFile(filePath: string): Partial<HypaPiConfig> {
   const config = parsed as Record<string, unknown>;
   const result: Partial<HypaPiConfig> = {};
   if (typeof config.mode === "string") result.mode = parseMode(config.mode);
+  if (Object.hasOwn(config, "disabledBuiltins")) {
+    result.disabledBuiltins = parseDisabledBuiltins(config.disabledBuiltins);
+  }
   if (typeof config.binary === "string" && config.binary.trim()) result.binary = config.binary.trim();
   if (typeof config.rewriteTimeoutMs === "number") {
     const value = parsePositiveInteger(String(config.rewriteTimeoutMs), 0);
@@ -76,6 +109,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, configFilePath?
   const mcpProxyFlag = env.HYPA_PI_ENABLE_MCP_PROXY ?? env.HYPA_PI_ENABLE_MCP;
   return {
     mode: env.HYPA_PI_MODE !== undefined ? parseMode(env.HYPA_PI_MODE) : (fileConfig.mode ?? "additive"),
+    disabledBuiltins: fileConfig.disabledBuiltins ?? DEFAULT_DISABLED_BUILTINS,
     binary: (env.HYPA_BIN?.trim() || undefined) ?? fileConfig.binary ?? "hypa",
     rewriteTimeoutMs:
       env.HYPA_PI_REWRITE_TIMEOUT_MS !== undefined
