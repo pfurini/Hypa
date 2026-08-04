@@ -164,6 +164,13 @@ public sealed class HypaShellToolTests
     [InlineData("echo ~")]
     [InlineData("echo ~user/bin")]
     [InlineData("echo \"$HOME\"")]
+    [InlineData("ls path/*.json")]
+    [InlineData("echo file?")]
+    [InlineData("ls file[ab].txt")]
+    [InlineData("echo {a,b}")]
+    [InlineData("echo {1..3}")]
+    [InlineData("echo ~*")]
+    [InlineData("echo {a,\"b\"}")]
     public async Task HypaShell_ExpansionCommand_UsesShellInterpreter(string command)
     {
         CommandInvocation? captured = null;
@@ -197,8 +204,10 @@ public sealed class HypaShellToolTests
     [Theory]
     [InlineData("echo \"~/Desktop\"")]
     [InlineData("echo a~b")]
-    [InlineData("echo ~*")]
-    public async Task HypaShell_NonExpandingTilde_UsesDirectProcessInvocation(string command)
+    [InlineData("echo \"*.ts\"")]
+    [InlineData("echo '{a,b}'")]
+    [InlineData("echo {x}")]
+    public async Task HypaShell_NonExpandingTildeOrQuotedGlob_UsesDirectProcessInvocation(string command)
     {
         CommandInvocation? captured = null;
         var compressedRunner = Substitute.For<ICommandRunnerService>();
