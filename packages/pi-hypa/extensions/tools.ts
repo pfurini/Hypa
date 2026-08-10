@@ -1,4 +1,5 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { access, mkdtemp, open, readFile, stat, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
 import { homedir, platform, tmpdir } from "node:os";
 import { join } from "node:path";
 import { Text } from "@earendil-works/pi-tui";
@@ -7,6 +8,15 @@ import { getExecArgs } from "./rewrite-client.js";
 
 const DEFAULT_MAX_BYTES = 50 * 1024;
 const DEFAULT_MAX_LINES = 2000;
+/** Max raw image bytes attached inline (base64 grows ~4/3). Beyond this we note and omit the image part. */
+const MAX_INLINE_IMAGE_BYTES = 5 * 1024 * 1024;
+const IMAGE_TYPE_SNIFF_BYTES = 4100;
+const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a] as const;
+
+type PiToolTextPart = { type: "text"; text: string };
+type PiToolImagePart = { type: "image"; data: string; mimeType: string };
+type PiToolContentPart = PiToolTextPart | PiToolImagePart;
+type PiToolResult = { content: PiToolContentPart[]; details?: unknown };
 
 type PiToolParams = Record<string, any>;
 type PiToolExecute = (
@@ -15,7 +25,7 @@ type PiToolExecute = (
   signal?: AbortSignal,
   onUpdate?: unknown,
   ctx?: unknown,
-) => Promise<{ content: Array<{ type: "text"; text: string }>; details?: unknown }>;
+) => Promise<PiToolResult>;
 
 type PiApi = {
   exec(command: string, args: string[], options?: Record<string, unknown>): Promise<HypaExecResult>;
@@ -177,13 +187,209 @@ function normalizePathArg(path: string): string {
 }
 
 export function buildReadCommand(path: string, offset?: number, limit?: number): string {
-  const quotedPath = shellQuote(normalizePathArg(path));
+  const normalized = normalizePathArg(path);
   if (offset !== undefined || limit !== undefined) {
     const start = Math.max(1, Math.floor(offset ?? 1));
     const end = limit !== undefined ? start + Math.max(1, Math.floor(limit)) - 1 : "$";
-    return `sed -n ${shellQuote(`${start},${end}p`)} -- ${quotedPath}`;
+    // BSD sed has no `--` end-of-options (macOS treats `--` as a filename).
+    // cat/grep/ls keep `--`; find is separate. Leading-dash relative paths get a
+    // `./` prefix so sed does not parse them as options (shell quoting alone does
+    // not help argv flags).
+    const sedPath = normalized.startsWith("-") ? `./${normalized}` : normalized;
+    return `sed -n ${shellQuote(`${start},${end}p`)} ${shellQuote(sedPath)}`;
   }
-  return `cat -- ${quotedPath}`;
+  return `cat -- ${shellQuote(normalized)}`;
+}
+
+/**
+ * Detect supported raster image MIME types from magic bytes (not file extension).
+ * Parity with Pi coding-agent mime sniff for png/jpeg/gif/webp.
+ */
+export function detectSupportedImageMimeType(buffer: Uint8Array | Buffer): string | null {
+  if (startsWithBytes(buffer, [0xff, 0xd8, 0xff])) {
+    // JPEG-LS (0xF7) is not a standard vision attachment; treat as unsupported.
+    return buffer.length > 3 && buffer[3] === 0xf7 ? null : "image/jpeg";
+  }
+  if (startsWithBytes(buffer, PNG_SIGNATURE)) {
+    return isStaticPng(buffer) ? "image/png" : null;
+  }
+  if (startsWithAscii(buffer, 0, "GIF87a") || startsWithAscii(buffer, 0, "GIF89a")) {
+    return "image/gif";
+  }
+  if (startsWithAscii(buffer, 0, "RIFF") && startsWithAscii(buffer, 8, "WEBP")) {
+    return "image/webp";
+  }
+  return null;
+}
+
+/** True when the buffer looks like opaque binary (not a supported image, not plain text). */
+export function looksLikeOpaqueBinary(buffer: Uint8Array | Buffer): boolean {
+  if (detectSupportedImageMimeType(buffer)) return false;
+  const sample = buffer.subarray(0, Math.min(buffer.length, IMAGE_TYPE_SNIFF_BYTES));
+  for (let i = 0; i < sample.length; i++) {
+    if (sample[i] === 0) return true;
+  }
+  return false;
+}
+
+function startsWithBytes(buffer: Uint8Array | Buffer, bytes: readonly number[]): boolean {
+  if (buffer.length < bytes.length) return false;
+  for (let i = 0; i < bytes.length; i++) {
+    if (buffer[i] !== bytes[i]) return false;
+  }
+  return true;
+}
+
+function startsWithAscii(buffer: Uint8Array | Buffer, offset: number, text: string): boolean {
+  if (buffer.length < offset + text.length) return false;
+  for (let i = 0; i < text.length; i++) {
+    if (buffer[offset + i] !== text.charCodeAt(i)) return false;
+  }
+  return true;
+}
+
+function readUint32BE(buffer: Uint8Array | Buffer, offset: number): number {
+  return (
+    ((buffer[offset] ?? 0) * 0x1000000 +
+      ((buffer[offset + 1] ?? 0) << 16) +
+      ((buffer[offset + 2] ?? 0) << 8) +
+      (buffer[offset + 3] ?? 0)) >>>
+    0
+  );
+}
+
+/** Accept standard static PNG (IHDR); reject animated PNG (acTL before IDAT) like Pi. */
+function isStaticPng(buffer: Uint8Array | Buffer): boolean {
+  if (buffer.length < 24) return false;
+  // IHDR length must be 13 and type "IHDR"
+  if (readUint32BE(buffer, PNG_SIGNATURE.length) !== 13) return false;
+  if (!startsWithAscii(buffer, 12, "IHDR")) return false;
+
+  let offset: number = PNG_SIGNATURE.length;
+  while (offset + 8 <= buffer.length) {
+    const chunkLength = readUint32BE(buffer, offset);
+    const typeOffset = offset + 4;
+    if (startsWithAscii(buffer, typeOffset, "acTL")) return false;
+    if (startsWithAscii(buffer, typeOffset, "IDAT")) return true;
+    const next = offset + 8 + chunkLength + 4;
+    if (next <= offset || next > buffer.length) return true; // incomplete sniff → allow
+    offset = next;
+  }
+  return true;
+}
+
+function getNonVisionImageNote(ctx: unknown): string | undefined {
+  const model = (ctx as { model?: { input?: unknown } } | null | undefined)?.model;
+  const input = model?.input;
+  if (!model || (Array.isArray(input) && input.includes("image"))) {
+    return undefined;
+  }
+  // Model present but no image modality advertised.
+  if (model && Array.isArray(input) && !input.includes("image")) {
+    return "[Current model does not support images. The image will be omitted from this request.]";
+  }
+  return undefined;
+}
+
+/**
+ * If path points at a supported image (magic-byte sniff), build multimodal tool content.
+ * Returns null when the file should go through the normal text read path.
+ *
+ * Sniffs only the leading {@link IMAGE_TYPE_SNIFF_BYTES} first so ordinary text reads
+ * do not load the full file into memory before falling through to the Hypa CLI path.
+ */
+export async function tryBuildImageReadResult(
+  path: string,
+  ctx?: unknown,
+): Promise<PiToolResult | null> {
+  const resolved = normalizePathArg(path);
+  try {
+    await access(resolved, constants.R_OK);
+  } catch {
+    return null; // missing/unreadable → fall through so Hypa CLI can report the error
+  }
+
+  let sniff: Buffer;
+  try {
+    const handle = await open(resolved, "r");
+    try {
+      const buf = Buffer.alloc(IMAGE_TYPE_SNIFF_BYTES);
+      const { bytesRead } = await handle.read(buf, 0, IMAGE_TYPE_SNIFF_BYTES, 0);
+      sniff = buf.subarray(0, bytesRead);
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    return null;
+  }
+
+  const mimeType = detectSupportedImageMimeType(sniff);
+  if (!mimeType) {
+    if (looksLikeOpaqueBinary(sniff)) {
+      let size = sniff.length;
+      try {
+        size = (await stat(resolved)).size;
+      } catch {
+        /* use sniff length */
+      }
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              `SUMMARY\nFile: ${path}\n\nDETAILS\n` +
+              `Binary file detected (${formatSize(size)}); not decoded as text. ` +
+              `Supported image formats (png/jpeg/gif/webp) are attached as vision content when recognized by content sniffing.`,
+          },
+        ],
+        details: { source: "hypa-read-binary", path: resolved, size },
+      };
+    }
+    return null;
+  }
+
+  let fileSize: number;
+  try {
+    fileSize = (await stat(resolved)).size;
+  } catch {
+    fileSize = sniff.length;
+  }
+
+  const nonVisionNote = getNonVisionImageNote(ctx);
+  let textNote = `Read image file [${mimeType}] (${formatSize(fileSize)})`;
+  const content: PiToolContentPart[] = [];
+
+  if (fileSize > MAX_INLINE_IMAGE_BYTES) {
+    textNote +=
+      `\n[Image omitted: ${formatSize(fileSize)} exceeds inline limit of ${formatSize(MAX_INLINE_IMAGE_BYTES)}. ` +
+      `Use a smaller asset or host-side resize.]`;
+    if (nonVisionNote) textNote += `\n${nonVisionNote}`;
+    content.push({ type: "text", text: textNote });
+    return { content, details: { source: "hypa-read-image", mimeType, omitted: true, size: fileSize } };
+  }
+
+  // Full read only after image sniff confirms a supported raster format.
+  let bytes: Buffer;
+  try {
+    bytes = await readFile(resolved);
+  } catch {
+    return null;
+  }
+
+  // Re-validate full buffer (defends against truncated/racey files between sniff and read).
+  const fullMime = detectSupportedImageMimeType(bytes) ?? mimeType;
+
+  if (nonVisionNote) textNote += `\n${nonVisionNote}`;
+  content.push({ type: "text", text: textNote });
+  content.push({
+    type: "image",
+    data: bytes.toString("base64"),
+    mimeType: fullMime,
+  });
+  return {
+    content,
+    details: { source: "hypa-read-image", mimeType: fullMime, size: bytes.length },
+  };
 }
 
 export function buildGrepCommand(params: {
@@ -360,7 +566,7 @@ function previewResultText(result: any, options: { expanded?: boolean; isPartial
   return new Text(`${preview}${hint}`, 0, 0);
 }
 
-async function toToolText(result: HypaExecResult, command: string, preferTail = false) {
+async function toToolText(result: HypaExecResult, command: string, preferTail = false): Promise<PiToolResult> {
   const combined = [result.stdout, result.stderr].filter((part) => part?.length > 0).join(result.stdout && result.stderr ? "\n" : "");
   const truncation = preferTail
     ? truncateText(combined, true)
@@ -418,11 +624,20 @@ export function registerHypaTools(pi: PiApi, config: HypaPiConfig) {
   pi.registerTool({
     name: "hypa_read",
     label: "hypa_read",
-    description: `Read a file through Hypa compression. Supports offset/limit line slices. Output is truncated to ${DEFAULT_MAX_LINES} lines or ${formatSize(DEFAULT_MAX_BYTES)} with full output saved when needed.`,
-    promptSnippet: "Read file contents through Hypa compression",
-    promptGuidelines: ["Use hypa_read to inspect file contents instead of cat/head/tail via shell."],
+    description: `Read a file through Hypa compression. Supports text (offset/limit line slices) and images (png/jpeg/gif/webp via content sniffing → vision attachments). Text output is truncated to ${DEFAULT_MAX_LINES} lines or ${formatSize(DEFAULT_MAX_BYTES)} with full output saved when needed.`,
+    promptSnippet: "Read file contents through Hypa compression (text or images)",
+    promptGuidelines: [
+      "Use hypa_read to inspect file contents instead of cat/head/tail via shell.",
+      "Image files are returned as vision image attachments (magic-byte detection), not text dumps.",
+    ],
     parameters: readSchema,
-    async execute(_toolCallId, params, signal, _onUpdate, _ctx) {
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+      // Images: attach vision content (do not shell-cat binary → mojibake). Offset/limit are ignored for images/binary.
+      if (typeof params.path === "string") {
+        const imageResult = await tryBuildImageReadResult(params.path, ctx);
+        if (imageResult) return imageResult;
+      }
+
       const command = buildReadCommand(params.path, params.offset, params.limit);
       const timeoutMs = params.maxTokens ? undefined : undefined;
       const result = await runHypaCommand(pi, config, command, timeoutMs, false, signal);
