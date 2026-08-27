@@ -55,7 +55,7 @@ Hypa is invoked via the platform-native binary whenever it is installed as an op
 | Variable | Default | Description |
 | --- | --- | --- |
 | `HYPA_BIN` | bundled `@hypabolic/hypa`, then `hypa` | Hypa executable or absolute path. |
-| `HYPA_PI_MODE` | `additive` | `additive` keeps Pi built-ins; `replace` disables the configured Pi built-ins after registering `hypa_*` tools. |
+| `HYPA_PI_MODE` | `additive` | `additive` keeps Pi built-ins; `replace` disables each configured Pi built-in only while its matching `hypa_*` tool is active (fail-open if the replacement is absent, e.g. subagent/`--tools` allowlists). |
 | `HYPA_PI_REWRITE_TIMEOUT_MS` | `5000` | Rewrite CLI timeout in milliseconds. |
 | `HYPA_PI_ASK_NON_INTERACTIVE` | `deny` | `Ask` fallback when `ctx.hasUI === false`: `deny` or `allow`. |
 | `HYPA_PI_ENABLE_MCP_PROXY` | `0` | Enable `hypa_mcp_proxy`, a lazy discovery/invocation bridge for upstream MCP servers configured in Hypa. |
@@ -79,7 +79,7 @@ Environment variables override config file values, and config file values overri
 }
 ```
 
-All JSON fields are optional. `disabledBuiltins` is JSON-only and applies when `mode` is `"replace"`. It accepts a duplicate-free array containing only `"bash"`, `"read"`, `"grep"`, `"find"`, and `"ls"`. Omitting it preserves the default shown above; an explicit empty array disables none.
+All JSON fields are optional. `disabledBuiltins` is JSON-only and applies when `mode` is `"replace"`. It accepts a duplicate-free array containing only `"bash"`, `"read"`, `"grep"`, `"find"`, and `"ls"`. Omitting it preserves the default shown above; an explicit empty array disables none. Listing a built-in makes it eligible for removal rather than removing it outright: it is dropped only when its matching `hypa_*` tool is also active in the session.
 
 To keep `pi-hashline-edit-pro`'s hash-anchored `read` while replacing the other supported Pi built-ins, use:
 
@@ -94,15 +94,15 @@ This leaves both `read` (owned by `pi-hashline-edit-pro`) and the explicitly nam
 
 ## CLI-backed tools
 
-When registered, the extension exposes Hypa-backed equivalents of Pi's file and shell built-ins. In `additive` mode they sit alongside Pi's own tools; in `replace` mode the configured built-ins are disabled so their Hypa equivalents can take over.
+When registered, the extension exposes Hypa-backed equivalents of Pi's file and shell built-ins. In `additive` mode they sit alongside Pi's own tools; in `replace` mode each `hypa_*` tool takes over its matching built-in only when that built-in is configured as disabled and both are active.
 
-| Tool | Purpose |
-| --- | --- |
-| `hypa_shell` | Run shell commands with rewrite rules, compression, and evidence recording. |
-| `hypa_read` | Read files with full, outline, signatures, pruned, or smart selection. |
-| `hypa_grep` | Search file contents with safe ripgrep options. |
-| `hypa_find` | Find files with an optional result limit. |
-| `hypa_ls` | List directory contents. |
+| Tool | Replaces | Purpose |
+| --- | --- | --- |
+| `hypa_shell` | `bash` | Run shell commands with rewrite rules, compression, and evidence recording. |
+| `hypa_read` | `read` | Read files with full, outline, signatures, pruned, or smart selection. |
+| `hypa_grep` | `grep` | Search file contents with safe ripgrep options. |
+| `hypa_find` | `find` | Find files with an optional result limit. |
+| `hypa_ls` | `ls` | List directory contents. |
 
 `hypa_*` tool outputs are capped at 50KB / 2000 lines; truncated full output is saved to a temp file for recovery.
 

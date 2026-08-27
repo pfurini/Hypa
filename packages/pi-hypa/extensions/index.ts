@@ -3,16 +3,38 @@ import { DEFAULT_DISABLED_BUILTINS, formatStatus, loadConfig, resolveConfigFileP
 import { resolveHypaBinary, rewriteCommand } from "./rewrite-client.js";
 import { registerHypaMcpProxyBridge } from "./mcp-proxy-bridge.js";
 import { registerHypaTools } from "./tools.js";
-import type { HypaDiagnostics, RewriteStatus } from "./types.js";
+import type { HypaDiagnostics, ReplaceableBuiltin, RewriteStatus } from "./types.js";
 
-export const REPLACE_MODE_DISABLED_BUILTINS = new Set(DEFAULT_DISABLED_BUILTINS);
+export const REPLACE_MODE_DISABLED_BUILTINS = new Set<string>(DEFAULT_DISABLED_BUILTINS);
+
+// Pi --tools allowlists both builtins and extension tools, so a session may have
+// bash/read without hypa_* (subagent/explore). Strip a builtin only when it is configured
+// as disabled and its pair is active.
+// Builtin names match @earendil-works/pi-coding-agent dist/core/tools/* (bash, read, grep, find, ls).
+export const REPLACE_MODE_BUILTIN_REPLACEMENTS = {
+  bash: "hypa_shell",
+  read: "hypa_read",
+  grep: "hypa_grep",
+  find: "hypa_find",
+  ls: "hypa_ls",
+} as const satisfies Readonly<Record<ReplaceableBuiltin, string>>;
+
+export function isReplaceableBuiltin(name: string): name is ReplaceableBuiltin {
+  return Object.hasOwn(REPLACE_MODE_BUILTIN_REPLACEMENTS, name);
+}
 
 export function applyReplaceModeFilter(
   tools: string[],
   mode: string,
   disabledBuiltins: ReadonlySet<string> = REPLACE_MODE_DISABLED_BUILTINS,
 ): string[] {
-  return mode === "replace" ? tools.filter((name) => !disabledBuiltins.has(name)) : tools;
+  if (mode !== "replace") return tools;
+  const active = new Set(tools);
+  return tools.filter((name) => {
+    if (!isReplaceableBuiltin(name)) return true;
+    if (!disabledBuiltins.has(name)) return true;
+    return !active.has(REPLACE_MODE_BUILTIN_REPLACEMENTS[name]);
+  });
 }
 
 type HypaExtensionAPI = ExtensionAPI & {
@@ -45,8 +67,10 @@ export default function (pi: ExtensionAPI) {
 
   if (config.mode === "replace") {
     pi.on("before_agent_start", () => {
-      const active = applyReplaceModeFilter(hypaPi.getActiveTools(), config.mode, disabledBuiltins);
-      hypaPi.setActiveTools(active);
+      const current = hypaPi.getActiveTools();
+      const active = applyReplaceModeFilter(current, config.mode, disabledBuiltins);
+      // Filter only removes; skip the write when nothing changed (common fail-open path).
+      if (active.length !== current.length) hypaPi.setActiveTools(active);
     });
   }
 
